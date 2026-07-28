@@ -216,25 +216,24 @@ test('worker.js API endpoints', async (t) => {
 
     await withMockFetch(async (url) => {
       requestedUrls.push(url);
-      if (url.includes('pgc/view/web/season?ep_id=1524250')) {
+      if (url.includes('pgc/view/v2/app/season') && url.includes('ep_id=1524250')) {
+        const parsedUrl = new URL(url);
+        assert.equal(parsedUrl.searchParams.get('appkey'), BilibiliSource.APP_KEY);
+        assert.match(parsedUrl.searchParams.get('sign'), /^[a-f0-9]{32}$/);
         return mockJsonResponse({
           code: 0,
-          result: { season_id: 45969 }
-        }, url);
-      }
-      if (url.includes('pgc/web/season/section?season_id=45969')) {
-        return mockJsonResponse({
-          code: 0,
-          result: {
-            main_section: {
-              episodes: [
-                { id: 1001, aid: 2001, cid: 3001, title: '1', long_title: '第一集' },
-                { id: 1093, aid: 2093, cid: 3093, title: '93', long_title: '第九十三集' }
-              ]
-            },
-            section: [
-              { title: 'PV花絮', episodes: [{ id: 9999, title: 'PV1' }] }
-            ]
+          data: {
+            season_id: 45969,
+            modules: [{
+              style: 'positive',
+              data: {
+                episodes: [
+                  { id: 1001, aid: 2001, cid: 3001, title: '1', long_title: '第一集', section_type: 0 },
+                  { id: 1093, aid: 2093, cid: 3093, title: '93', long_title: '第九十三集', section_type: 0 },
+                  { id: 9999, aid: 2999, cid: 3999, title: '94', badge: '预告', section_type: 1 }
+                ]
+              }
+            }]
           }
         }, url);
       }
@@ -249,8 +248,62 @@ test('worker.js API endpoints', async (t) => {
       assert.equal(episodes[1].link, 'https://www.bilibili.com/bangumi/play/ep1093');
     });
 
+    assert.equal(requestedUrls.length, 1);
+  });
+
+  await t.test('BilibiliSource should fall back to the signed app API after a web 412', async () => {
+    Globals.init({});
+    const source = new BilibiliSource();
+    const requestedUrls = [];
+
+    await withMockFetch(async (url) => {
+      requestedUrls.push(url);
+      if (url.includes('pgc/view/web/season?ep_id=3537939')) {
+        return {
+          ok: false,
+          status: 412,
+          url,
+          headers: new Headers(),
+          text: async () => ''
+        };
+      }
+      if (url.includes('pgc/view/v2/app/season') && url.includes('ep_id=3537939')) {
+        return mockJsonResponse({
+          code: 0,
+          data: {
+            season_id: 45969,
+            modules: [{
+              style: 'positive',
+              data: {
+                episodes: [{
+                  id: 3537939,
+                  aid: 116980279478693,
+                  cid: 40287407775,
+                  duration: 1317000,
+                  title: '93',
+                  show_title: '第93话 弑帝',
+                  section_type: 0
+                }]
+              }
+            }]
+          }
+        }, url);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }, async () => {
+      const segments = await source.getComments(
+        'https://www.bilibili.com/bangumi/play/ep3537939',
+        'bilibili1',
+        true
+      );
+
+      assert.equal(segments.type, 'bilibili1');
+      assert.equal(segments.duration, 1317);
+      assert.equal(segments.segmentList.length, 4);
+      assert(segments.segmentList[0].url.includes('oid=40287407775'));
+    });
+
     assert.equal(requestedUrls.length, 2);
-    assert(requestedUrls[1].includes('/pgc/web/season/section'));
   });
 
   await t.test('Kan360Source should replace a stale Bilibili list with fresher native episodes', async () => {

@@ -450,7 +450,91 @@ export default class BilibiliSource extends BaseSource {
   /**
    * 获取番剧分集列表
    */
+  async _getPgcAppSeason({ seasonId = null, episodeId = null } = {}) {
+    if (!seasonId && !episodeId) return null;
+
+    const params = {
+      appkey: BilibiliSource.APP_KEY,
+      build: '8140200',
+      mobi_app: 'android',
+      platform: 'android',
+      ts: Math.floor(Date.now() / 1000)
+    };
+    if (seasonId) params.season_id = String(seasonId);
+    else params.ep_id = String(episodeId);
+
+    const query = Object.keys(params)
+      .sort()
+      .map(key => `${key}=${this._javaUrlEncode(String(params[key]))}`)
+      .join('&');
+    const sign = md5(query + BilibiliSource.APP_SEC);
+    const targetUrl = `https://api.bilibili.com/pgc/view/v2/app/season?${query}&sign=${sign}`;
+
+    try {
+      const response = await httpGet(globals.makeProxyUrl(targetUrl), {
+        headers: {
+          "User-Agent": "Mozilla/5.0 Android",
+          "X-From-Biliroaming": "1.0.0",
+          "Cookie": globals.bilibliCookie || ""
+        }
+      });
+      const payload = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+      if (payload?.code !== 0 || !payload.data) {
+        log("warn", `[bilibili] APP 番剧接口返回错误: ${payload?.code} ${payload?.message || ""}`);
+        return null;
+      }
+
+      const positiveModule = (payload.data.modules || []).find(module => module.style === 'positive');
+      const allEpisodes = positiveModule?.data?.episodes || payload.data.episodes || [];
+      const mainEpisodes = allEpisodes.filter(episode => episode.section_type === 0);
+
+      return {
+        seasonId: payload.data.season_id || seasonId,
+        cover: payload.data.cover || "",
+        episodes: mainEpisodes.length > 0 ? mainEpisodes : allEpisodes
+      };
+    } catch (error) {
+      log("warn", `[bilibili] APP 番剧接口请求失败: ${error.message}`);
+      return null;
+    }
+  }
+
+  _formatPgcEpisodes(rawEpisodes, cover = "") {
+    const episodes = rawEpisodes.map((ep, index) => {
+      let displayTitle = "";
+
+      if (ep.show_title) {
+        displayTitle = ep.show_title;
+      } else {
+        const epIndex = ep.title || String(index + 1);
+        const longTitle = ep.long_title || "";
+        displayTitle = /^\d+(\.\d+)?$/.test(epIndex) ? `第${epIndex}话` : epIndex;
+        if (longTitle && longTitle !== epIndex) {
+          displayTitle += ` ${longTitle}`;
+        }
+      }
+
+      const episodeId = ep.id || ep.ep_id;
+      return {
+        vid: `${ep.aid},${ep.cid}`,
+        id: episodeId,
+        title: displayTitle.trim(),
+        link: ep.link || `https://www.bilibili.com/bangumi/play/ep${episodeId}`
+      };
+    }).filter(episode => episode.id && episode.link);
+
+    if (cover) episodes._cover = cover;
+    return episodes;
+  }
+
   async _getPgcEpisodes(seasonId) {
+    const appSeason = await this._getPgcAppSeason({ seasonId });
+    if (appSeason?.episodes?.length > 0) {
+      const episodes = this._formatPgcEpisodes(appSeason.episodes, appSeason.cover);
+      log("info", `[bilibili] APP 接口获取到 ${episodes.length} 个正片分集`);
+      return episodes;
+    }
+
     let rawEpisodes = [];
     // Section 接口明确区分正片与花絮，优先用于构建分集列表。
     const apis = [
@@ -488,30 +572,7 @@ export default class BilibiliSource extends BaseSource {
         return [];
     }
 
-    const episodes = rawEpisodes.map((ep, index) => {
-        let displayTitle = "";
-
-        if (ep.show_title) {
-            displayTitle = ep.show_title;
-        } else {
-            const epIndex = ep.title || String(index + 1);
-            const longTitle = ep.long_title || "";
-            displayTitle = /^\d+(\.\d+)?$/.test(epIndex) ? `第${epIndex}话` : epIndex;
-            if (longTitle && longTitle !== epIndex) {
-                displayTitle += ` ${longTitle}`;
-            }
-        }
-
-        return {
-            vid: `${ep.aid},${ep.cid}`,
-            id: ep.id,
-            title: displayTitle.trim(),
-            link: `https://www.bilibili.com/bangumi/play/ep${ep.id}`
-        };
-    });
-
-    // 将详情接口封面转移到返回数组（.map() 产生新数组，不会继承原数组属性）
-    if (rawEpisodes._cover) episodes._cover = rawEpisodes._cover;
+    const episodes = this._formatPgcEpisodes(rawEpisodes, rawEpisodes._cover);
 
     log("info", `[bilibili] 获取到 ${episodes.length} 个番剧分集`);
     return episodes;
@@ -533,6 +594,15 @@ export default class BilibiliSource extends BaseSource {
     } catch (error) {
       seasonId = seasonPathMatch?.[1] || null;
     }
+
+    const appSeason = await this._getPgcAppSeason({
+      seasonId,
+      episodeId: seasonId ? null : episodeMatch?.[1]
+    });
+    if (appSeason?.episodes?.length > 0) {
+      return this._formatPgcEpisodes(appSeason.episodes, appSeason.cover);
+    }
+    seasonId = seasonId || appSeason?.seasonId || null;
 
     if (!seasonId && episodeMatch) {
       try {
@@ -885,17 +955,35 @@ export default class BilibiliSource extends BaseSource {
 
         // 轨道一：直连模式 (非港澳台标记)
         if (!isOversea) {
-            const res = await httpGet(`${api_epid_cid}?ep_id=${epid}`, {
-               headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" }
-            });
-            const data = typeof res.data === "string" ? JSON.parse(res.data) : res.data;
-            if (data.code === 0 && data.result) {
-               const ep = data.result.episodes.find(e => e.id == epid);
-               if (ep) { cid = ep.cid; duration = ep.duration / 1000; title = ep.share_copy; success = true; }
+            try {
+                const res = await httpGet(`${api_epid_cid}?ep_id=${epid}`, {
+                   headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" }
+                });
+                const data = typeof res.data === "string" ? JSON.parse(res.data) : res.data;
+                if (data.code === 0 && data.result) {
+                   const ep = data.result.episodes.find(e => e.id == epid);
+                   if (ep) { cid = ep.cid; duration = ep.duration / 1000; title = ep.share_copy; success = true; }
+                }
+            } catch (error) {
+                log("warn", `[bilibili] Web 番剧信息请求失败，尝试 APP 接口: ${error.message}`);
             }
         }
 
-        // 轨道二：代理模式 (港澳台标记 或 直连失败且有seasonId)
+        // 轨道二：签名 APP 接口，Cloudflare 出口被 Web API 以 412 拒绝时使用。
+        if (!success) {
+            const appSeason = await this._getPgcAppSeason({ episodeId: epid });
+            const ep = appSeason?.episodes?.find(item => String(item.id || item.ep_id) === String(epid));
+            if (ep) {
+                cid = ep.cid;
+                aid = ep.aid;
+                duration = ep.duration ? ep.duration / 1000 : 0;
+                title = ep.share_copy || ep.show_title || ep.long_title || "";
+                seasonId = seasonId || String(appSeason.seasonId || "");
+                success = true;
+            }
+        }
+
+        // 轨道三：代理模式 (港澳台标记 或直连失败且有 seasonId)
         if ((!success || isOversea) && seasonId && this._hasBilibiliProxy()) {
             // 尝试 View 接口 (必须走代理)
             try {
