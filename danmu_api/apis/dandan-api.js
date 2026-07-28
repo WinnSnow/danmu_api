@@ -48,7 +48,6 @@ import { Anime, AnimeMatch, Episodes, Bangumi } from "../models/dandan-model.js"
 // 兼容弹弹play接口
 // =====================
 
-const kan360Source = new Kan360Source();
 const vodSource = new VodSource();
 const renrenSource = new RenrenSource();
 const hanjutvSource = new HanjutvSource();
@@ -60,6 +59,11 @@ const youkuSource = new YoukuSource();
 const iqiyiSource = new IqiyiSource();
 const mangoSource = new MangoSource();
 const bilibiliSource = new BilibiliSource();
+const kan360Source = new Kan360Source({
+  episodeRefreshers: {
+    bilibili1: url => bilibiliSource.getEpisodesFromUrl(url)
+  }
+});
 const miguSource = new MiguSource();
 const sohuSource = new SohuSource();
 const leshiSource = new LeshiSource();

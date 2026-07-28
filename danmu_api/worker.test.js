@@ -29,6 +29,7 @@ import AiyifanSource from "./sources/aiyifan.js";
 import HongguoSource, { parseHongguoPlayerUrl } from "./sources/hongguo.js";
 import AnimekoSource from "./sources/animeko.js";
 import OtherSource from "./sources/other.js";
+import Kan360Source from "./sources/kan360.js";
 import { NodeHandler } from "./configs/handlers/node-handler.js";
 import { VercelHandler } from "./configs/handlers/vercel-handler.js";
 import { NetlifyHandler } from "./configs/handlers/netlify-handler.js";
@@ -206,6 +207,123 @@ test('worker.js API endpoints', async (t) => {
     });
 
     assert.equal(seenRedirectMode, 'manual');
+  });
+
+  await t.test('BilibiliSource should resolve an episode URL to main-section episodes', async () => {
+    Globals.init({});
+    const source = new BilibiliSource();
+    const requestedUrls = [];
+
+    await withMockFetch(async (url) => {
+      requestedUrls.push(url);
+      if (url.includes('pgc/view/web/season?ep_id=1524250')) {
+        return mockJsonResponse({
+          code: 0,
+          result: { season_id: 45969 }
+        }, url);
+      }
+      if (url.includes('pgc/web/season/section?season_id=45969')) {
+        return mockJsonResponse({
+          code: 0,
+          result: {
+            main_section: {
+              episodes: [
+                { id: 1001, aid: 2001, cid: 3001, title: '1', long_title: '第一集' },
+                { id: 1093, aid: 2093, cid: 3093, title: '93', long_title: '第九十三集' }
+              ]
+            },
+            section: [
+              { title: 'PV花絮', episodes: [{ id: 9999, title: 'PV1' }] }
+            ]
+          }
+        }, url);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }, async () => {
+      const episodes = await source.getEpisodesFromUrl(
+        'https://www.bilibili.com/bangumi/play/ep1524250?bsource=360ogvys'
+      );
+
+      assert.equal(episodes.length, 2);
+      assert.equal(episodes[0].title, '第1话 第一集');
+      assert.equal(episodes[1].link, 'https://www.bilibili.com/bangumi/play/ep1093');
+    });
+
+    assert.equal(requestedUrls.length, 2);
+    assert(requestedUrls[1].includes('/pgc/web/season/section'));
+  });
+
+  await t.test('Kan360Source should replace a stale Bilibili list with fresher native episodes', async () => {
+    resetSearchState();
+    const staleLinks = Array.from({ length: 68 }, (_, index) => ({
+      url: `https://www.bilibili.com/bangumi/play/ep${index + 1}`
+    }));
+    const nativeEpisodes = Array.from({ length: 93 }, (_, index) => ({
+      title: `第${index + 1}话`,
+      link: `https://www.bilibili.com/bangumi/play/ep${1000 + index + 1}`
+    }));
+    let refreshSeedUrl = null;
+    const source = new Kan360Source({
+      episodeRefreshers: {
+        bilibili1: async (url) => {
+          refreshSeedUrl = url;
+          return nativeEpisodes;
+        }
+      }
+    });
+    const animes = [];
+    const detailStore = new Map();
+
+    await source.handleAnimes([{
+      id: '254336',
+      en_id: 'O08sbJ7oMICxDj',
+      titleTxt: '牧神记',
+      cat_name: '动漫',
+      year: '2024',
+      cover: '',
+      seriesSite: 'bilibili1',
+      seriesPlaylinks: staleLinks,
+      playlinks: {
+        bilibili1: 'https://www.bilibili.com/bangumi/play/ep1524250?bsource=360ogvys'
+      }
+    }], '牧神记', animes, detailStore);
+
+    assert.equal(refreshSeedUrl, 'https://www.bilibili.com/bangumi/play/ep1524250?bsource=360ogvys');
+    assert.equal(animes.length, 1);
+    assert.equal(animes[0].episodeCount, 93);
+    const storedAnime = Array.from(detailStore.values())[0];
+    assert.equal(storedAnime.links.length, 93);
+    assert.equal(storedAnime.links[92].url, 'https://www.bilibili.com/bangumi/play/ep1093');
+  });
+
+  await t.test('Kan360Source should retain stale data when native refresh fails', async () => {
+    resetSearchState();
+    const source = new Kan360Source({
+      episodeRefreshers: {
+        bilibili1: async () => {
+          throw new Error('native unavailable');
+        }
+      }
+    });
+    const animes = [];
+
+    await source.handleAnimes([{
+      id: '254336',
+      en_id: 'O08sbJ7oMICxDj',
+      titleTxt: '牧神记',
+      cat_name: '动漫',
+      year: '2024',
+      cover: '',
+      seriesSite: 'bilibili1',
+      seriesPlaylinks: Array.from({ length: 68 }, (_, index) => ({
+        url: `https://www.bilibili.com/bangumi/play/ep${index + 1}`
+      })),
+      playlinks: {
+        bilibili1: 'https://www.bilibili.com/bangumi/play/ep1524250'
+      }
+    }], '牧神记', animes, new Map());
+
+    assert.equal(animes[0].episodeCount, 68);
   });
 
   await t.test('buildSearchAnimeUrl should preserve special characters in keyword', async () => {

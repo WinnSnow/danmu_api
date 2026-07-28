@@ -452,15 +452,16 @@ export default class BilibiliSource extends BaseSource {
    */
   async _getPgcEpisodes(seasonId) {
     let rawEpisodes = [];
-    // 增加 Section 接口作为回退，解决港澳台个别条目分集不显式输出
+    // Section 接口明确区分正片与花絮，优先用于构建分集列表。
     const apis = [
-        `https://api.bilibili.com/pgc/view/web/season?season_id=${seasonId}`,
-        `https://api.bilibili.com/pgc/web/season/section?season_id=${seasonId}`
+        `https://api.bilibili.com/pgc/web/season/section?season_id=${seasonId}`,
+        `https://api.bilibili.com/pgc/view/web/season?season_id=${seasonId}`
     ];
 
     for (const url of apis) {
         try {
-            const response = await httpGet(url, {
+            const requestUrl = globals.makeProxyUrl(url);
+            const response = await httpGet(requestUrl, {
                 headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": "https://www.bilibili.com/",
@@ -514,6 +515,50 @@ export default class BilibiliSource extends BaseSource {
 
     log("info", `[bilibili] 获取到 ${episodes.length} 个番剧分集`);
     return episodes;
+  }
+
+  /**
+   * 从 Bilibili 番剧播放地址解析完整正片列表。
+   */
+  async getEpisodesFromUrl(url) {
+    if (!url || typeof url !== "string") return [];
+
+    let seasonId = null;
+    const seasonPathMatch = url.match(/\/ss(\d+)/i);
+    const episodeMatch = url.match(/\/ep(\d+)/i);
+
+    try {
+      const parsedUrl = new URL(url);
+      seasonId = parsedUrl.searchParams.get("season_id") || seasonPathMatch?.[1] || null;
+    } catch (error) {
+      seasonId = seasonPathMatch?.[1] || null;
+    }
+
+    if (!seasonId && episodeMatch) {
+      try {
+        const infoUrl = globals.makeProxyUrl(
+          `https://api.bilibili.com/pgc/view/web/season?ep_id=${episodeMatch[1]}`
+        );
+        const response = await httpGet(infoUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/",
+            "Cookie": globals.bilibliCookie || ""
+          }
+        });
+        const data = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+        seasonId = data?.code === 0 ? data.result?.season_id : null;
+      } catch (error) {
+        log("warn", `[bilibili] 从播放地址解析 season_id 失败: ${error.message}`);
+      }
+    }
+
+    if (!seasonId) {
+      log("warn", `[bilibili] 播放地址中未找到 season_id: ${url}`);
+      return [];
+    }
+
+    return this._getPgcEpisodes(String(seasonId));
   }
 
   /**

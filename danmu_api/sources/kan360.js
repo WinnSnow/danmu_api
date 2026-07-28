@@ -4,12 +4,40 @@ import { log } from "../utils/log-util.js";
 import { httpGet } from "../utils/http-util.js";
 import { generateValidStartDate } from "../utils/time-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
-import { titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle, extractEpisodeNumberFromTitle } from "../utils/common-util.js";
 
 // =====================
 // 获取360看源播放链接
 // =====================
 export default class Kan360Source extends BaseSource {
+  constructor({ episodeRefreshers = {} } = {}) {
+    super();
+    this.episodeRefreshers = episodeRefreshers;
+  }
+
+  async refreshNativeEpisodes(site, seedUrl) {
+    const refresher = this.episodeRefreshers[site];
+    if (!refresher || !seedUrl) return [];
+
+    try {
+      const episodes = await refresher(seedUrl);
+      if (!Array.isArray(episodes)) return [];
+
+      return episodes.map((episode, index) => {
+        const episodeNumber = extractEpisodeNumberFromTitle(episode.title) || index + 1;
+        return {
+          name: String(episodeNumber),
+          url: episode.link || episode.url || "",
+          title: `【${site}】 ${episode.title || `第${episodeNumber}集`}`,
+          sort: String(episodeNumber)
+        };
+      }).filter(episode => episode.url);
+    } catch (error) {
+      log("warn", `[360kan] ${site} 原生分集刷新失败，继续使用 360 列表: ${error.message}`);
+      return [];
+    }
+  }
+
   // 查询360kan综艺详情
   async get360Zongyi(title, entId, site, year) {
     try {
@@ -360,6 +388,15 @@ export default class Kan360Source extends BaseSource {
                   log('error', `[360kan] failed to fetch episodesv2 for site ${siteKey}: ${e && e.message ? e.message : e}`);
                 }
               }
+            }
+
+            const nativeSite = anime.seriesSite || Object.keys(anime.playlinks || {})
+              .find(site => this.episodeRefreshers[site]);
+            const seedUrl = anime.playlinks?.[nativeSite] || links[0]?.url;
+            const nativeLinks = await this.refreshNativeEpisodes(nativeSite, seedUrl);
+            if (nativeLinks.length > links.length) {
+              log("info", `[360kan] ${anime.titleTxt} 使用 ${nativeSite} 原生分集刷新: ${links.length} -> ${nativeLinks.length}`);
+              links = nativeLinks;
             }
           } else if (anime.cat_name === "综艺") {
             const zongyiLinks = await Promise.all(
