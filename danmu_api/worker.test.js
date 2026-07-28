@@ -251,6 +251,82 @@ test('worker.js API endpoints', async (t) => {
     assert.equal(requestedUrls.length, 1);
   });
 
+  await t.test('BilibiliSource should use the alternate API host after an app API 412', async () => {
+    Globals.init({});
+    const source = new BilibiliSource();
+    const requestedHosts = [];
+
+    await withMockFetch(async (url) => {
+      const parsedUrl = new URL(url);
+      requestedHosts.push(parsedUrl.hostname);
+      if (parsedUrl.hostname === 'api.bilibili.com') {
+        return new Response('', { status: 412 });
+      }
+      if (parsedUrl.hostname === 'api.biliapi.net') {
+        return mockJsonResponse({
+          code: 0,
+          data: {
+            season_id: 45969,
+            modules: [{
+              style: 'positive',
+              data: {
+                episodes: [
+                  { id: 1001, aid: 2001, cid: 3001, title: '1', section_type: 0 },
+                  { id: 1093, aid: 2093, cid: 3093, title: '93', section_type: 0 }
+                ]
+              }
+            }]
+          }
+        }, url);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }, async () => {
+      const episodes = await source.getEpisodesFromUrl(
+        'https://www.bilibili.com/bangumi/play/ep1524250'
+      );
+
+      assert.equal(episodes.length, 2);
+      assert.equal(episodes[1].title, '第93话');
+    });
+
+    assert.deepEqual(requestedHosts, ['api.bilibili.com', 'api.biliapi.net']);
+  });
+
+  await t.test('BilibiliSource should use the alternate API host for danmaku segments', async () => {
+    Globals.init({});
+    const source = new BilibiliSource();
+    const requestedHosts = [];
+
+    await withMockFetch(async (url) => {
+      const parsedUrl = new URL(url);
+      requestedHosts.push(parsedUrl.hostname);
+      if (parsedUrl.hostname === 'api.bilibili.com') {
+        return new Response('', { status: 412 });
+      }
+      if (parsedUrl.hostname === 'api.biliapi.net') {
+        const protobuf = Uint8Array.from([0x0a, 0x03, 0x3a, 0x01, 0x78]);
+        return new Response(protobuf, {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' }
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }, async () => {
+      const comments = await source.getEpisodeSegmentDanmu({
+        url: 'https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid=40287407775&segment_index=1'
+      });
+
+      assert.equal(comments.length, 1);
+      assert.equal(comments[0].content, 'x');
+    });
+
+    assert.deepEqual(requestedHosts, [
+      'api.bilibili.com',
+      'api.bilibili.com',
+      'api.biliapi.net'
+    ]);
+  });
+
   await t.test('BilibiliSource should fall back to the signed app API after a web 412', async () => {
     Globals.init({});
     const source = new BilibiliSource();

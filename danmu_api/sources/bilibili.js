@@ -28,6 +28,7 @@ export default class BilibiliSource extends BaseSource {
   // APP 签名相关常量 (Android 粉版 - 港澳台搜索用)
   static APP_KEY = '1d8b6e7d45233436';
   static APP_SEC = '560c52ccd288fed045859ed18bffd973';
+  static API_HOSTS = ['api.bilibili.com', 'api.biliapi.net'];
 
   // 解析 b23.tv 短链接
   async resolveB23Link(shortUrl) {
@@ -468,35 +469,41 @@ export default class BilibiliSource extends BaseSource {
       .map(key => `${key}=${this._javaUrlEncode(String(params[key]))}`)
       .join('&');
     const sign = md5(query + BilibiliSource.APP_SEC);
-    const targetUrl = `https://api.bilibili.com/pgc/view/v2/app/season?${query}&sign=${sign}`;
+    const path = `/pgc/view/v2/app/season?${query}&sign=${sign}`;
 
-    try {
-      const response = await httpGet(globals.makeProxyUrl(targetUrl), {
-        headers: {
-          "User-Agent": "Mozilla/5.0 Android",
-          "X-From-Biliroaming": "1.0.0",
-          "Cookie": globals.bilibliCookie || ""
+    for (const [index, host] of BilibiliSource.API_HOSTS.entries()) {
+      const targetUrl = `https://${host}${path}`;
+      try {
+        const response = await httpGet(globals.makeProxyUrl(targetUrl), {
+          headers: {
+            "User-Agent": "Mozilla/5.0 Android",
+            "X-From-Biliroaming": "1.0.0",
+            "Cookie": globals.bilibliCookie || ""
+          }
+        });
+        const payload = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+        if (payload?.code !== 0 || !payload.data) {
+          throw new Error(`API code ${payload?.code}: ${payload?.message || "unknown error"}`);
         }
-      });
-      const payload = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
-      if (payload?.code !== 0 || !payload.data) {
-        log("warn", `[bilibili] APP 番剧接口返回错误: ${payload?.code} ${payload?.message || ""}`);
-        return null;
+
+        if (index > 0) {
+          log("info", `[bilibili] APP 番剧接口已切换到备用域名 ${host}`);
+        }
+        const positiveModule = (payload.data.modules || []).find(module => module.style === 'positive');
+        const allEpisodes = positiveModule?.data?.episodes || payload.data.episodes || [];
+        const mainEpisodes = allEpisodes.filter(episode => episode.section_type === 0);
+
+        return {
+          seasonId: payload.data.season_id || seasonId,
+          cover: payload.data.cover || "",
+          episodes: mainEpisodes.length > 0 ? mainEpisodes : allEpisodes
+        };
+      } catch (error) {
+        log("warn", `[bilibili] APP 番剧接口请求失败 (${host}): ${error.message}`);
       }
-
-      const positiveModule = (payload.data.modules || []).find(module => module.style === 'positive');
-      const allEpisodes = positiveModule?.data?.episodes || payload.data.episodes || [];
-      const mainEpisodes = allEpisodes.filter(episode => episode.section_type === 0);
-
-      return {
-        seasonId: payload.data.season_id || seasonId,
-        cover: payload.data.cover || "",
-        episodes: mainEpisodes.length > 0 ? mainEpisodes : allEpisodes
-      };
-    } catch (error) {
-      log("warn", `[bilibili] APP 番剧接口请求失败: ${error.message}`);
-      return null;
     }
+
+    return null;
   }
 
   _formatPgcEpisodes(rawEpisodes, cover = "") {
@@ -1213,15 +1220,35 @@ export default class BilibiliSource extends BaseSource {
       // 提取被附加到 URL hash 中的元数据
       const urlObj = new URL(segment.url);
       const rawUrl = segment.url.split('#')[0];
+      const requestUrls = [rawUrl];
+      if (urlObj.hostname === BilibiliSource.API_HOSTS[0]) {
+        const fallbackUrl = new URL(rawUrl);
+        fallbackUrl.hostname = BilibiliSource.API_HOSTS[1];
+        requestUrls.push(fallbackUrl.toString());
+      }
 
-      const response = await httpGet(rawUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-          "Cookie": globals.bilibliCookie
-        },
-        base64Data: true,
-        retries: 1,
-      });
+      let response = null;
+      let lastError = null;
+      for (const [index, requestUrl] of requestUrls.entries()) {
+        try {
+          response = await httpGet(requestUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+              "Cookie": globals.bilibliCookie
+            },
+            base64Data: true,
+            retries: 1,
+          });
+          if (index > 0) {
+            log("info", `[bilibili] 弹幕分片已切换到备用域名 ${new URL(requestUrl).hostname}`);
+          }
+          break;
+        } catch (error) {
+          lastError = error;
+          log("warn", `[bilibili] 弹幕分片请求失败 (${new URL(requestUrl).hostname}): ${error.message}`);
+        }
+      }
+      if (!response) throw lastError || new Error("弹幕分片请求失败");
 
       // 处理响应数据并返回 contents 格式的弹幕
       let contents = [];
