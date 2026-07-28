@@ -243,8 +243,8 @@ export function matchSeason(anime, queryTitle, season) {
  * @param {string|null} targetPlatform 期望优先验证的目标平台
  * @returns {boolean} 是否满足需求
  */
-function checkEpisodeSatisfied(animesList, querySeason, queryEpisode, requestAnimeDetailsMap, targetPlatform) {
-  if (queryEpisode === null || querySeason === null) return true;
+export function checkEpisodeSatisfied(animesList, querySeason, queryEpisode, requestAnimeDetailsMap, targetPlatform) {
+  if (queryEpisode === null) return true;
 
   let targetPlatforms = [];
   if (targetPlatform) {
@@ -1827,7 +1827,7 @@ export async function searchEpisodes(url) {
   }
 
   // 先搜索动漫
-  let searchUrl = buildSearchAnimeUrl(url, anime);
+  let searchUrl = buildSearchAnimeUrl(url, anime, undefined, episode || undefined);
   const requestAnimeDetailsMap = new Map();
 
   const searchRes = await searchAnime(searchUrl, null, null, requestAnimeDetailsMap);

@@ -24,6 +24,16 @@ const bahamutSource = new BahamutSource();
 
 const DandanUserAgent = `LogVar Danmu API/${globals.version}`
 
+export function filterReleasedEpisodes(episodes, now = Date.now()) {
+  if (!Array.isArray(episodes)) return [];
+
+  return episodes.filter(episode => {
+    if (!episode?.airDate) return true;
+    const airTime = Date.parse(episode.airDate);
+    return Number.isNaN(airTime) || airTime <= now;
+  });
+}
+
 // =====================
 // 获取弹弹play弹幕
 // =====================
@@ -232,7 +242,11 @@ export default class DandanSource extends BaseSource {
       const bangumiData = resp.data.bangumi;
 
       // 提取剧集列表，确保它是数组
-      const episodes = Array.isArray(bangumiData.episodes) ? bangumiData.episodes : [];
+      const allEpisodes = Array.isArray(bangumiData.episodes) ? bangumiData.episodes : [];
+      const episodes = filterReleasedEpisodes(allEpisodes);
+      if (episodes.length < allEpisodes.length) {
+        log("info", `[dandan] 已过滤 ${allEpisodes.length - episodes.length} 个未来待播分集`);
+      }
 
       // 提取标题别名列表
       // 数据源格式: [{"language":"主标题","title":"雨天遇见狸"}, ...]

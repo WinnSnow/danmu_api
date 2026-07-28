@@ -5,7 +5,7 @@ dotenv.config();
 import test from 'node:test';
 import assert from 'node:assert';
 import { handleRequest } from './worker.js';
-import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl } from "./apis/dandan-api.js";
+import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl, checkEpisodeSatisfied } from "./apis/dandan-api.js";
 import { getRedisKey, pingRedis, setRedisKey, setRedisKeyWithExpiry } from "./utils/redis-util.js";
 import { getLocalRedisKey, setLocalRedisKey, setLocalRedisKeyWithExpiry } from "./utils/local-redis-util.js";
 import { getImdbepisodes } from "./utils/imdb-util.js";
@@ -30,6 +30,7 @@ import HongguoSource, { parseHongguoPlayerUrl } from "./sources/hongguo.js";
 import AnimekoSource from "./sources/animeko.js";
 import OtherSource from "./sources/other.js";
 import Kan360Source from "./sources/kan360.js";
+import { filterReleasedEpisodes } from "./sources/dandan.js";
 import { NodeHandler } from "./configs/handlers/node-handler.js";
 import { VercelHandler } from "./configs/handlers/vercel-handler.js";
 import { NetlifyHandler } from "./configs/handlers/netlify-handler.js";
@@ -148,6 +149,12 @@ test('worker.js API endpoints', async (t) => {
 
     assert(handler instanceof HuggingfaceHandler);
     assert(HandlerFactory.getSupportedPlatforms().includes('huggingface'));
+  });
+
+  await t.test('default source order should include the complete dandan source', () => {
+    const config = Globals.init({});
+
+    assert.deepEqual(config.sourceOrderArr, ['douban', 'dandan', '360', 'renren', 'hanjutv']);
   });
 
   await t.test('HuggingfaceHandler should call Space variables and restart APIs', async () => {
@@ -453,6 +460,40 @@ test('worker.js API endpoints', async (t) => {
     }], '牧神记', animes, new Map());
 
     assert.equal(animes[0].episodeCount, 68);
+  });
+
+  await t.test('checkEpisodeSatisfied should validate an episode without an explicit season', () => {
+    Globals.init({});
+    const summary = {
+      animeId: 254336,
+      bangumiId: '254336',
+      animeTitle: '牧神记(2024)【动漫】from 360',
+      source: '360'
+    };
+    const detail = {
+      ...summary,
+      links: Array.from({ length: 68 }, (_, index) => ({
+        id: index + 1,
+        title: `【bilibili1】 第${index + 1}集`
+      }))
+    };
+    const detailStore = new Map([['detail', detail]]);
+
+    assert.equal(checkEpisodeSatisfied([summary], null, 68, detailStore, null), true);
+    assert.equal(checkEpisodeSatisfied([summary], null, 93, detailStore, null), false);
+  });
+
+  await t.test('filterReleasedEpisodes should remove future placeholder episodes', () => {
+    const episodes = [
+      { episodeNumber: '92', airDate: '2026-07-19T00:00:00' },
+      { episodeNumber: '93', airDate: '2026-07-26T00:00:00' },
+      { episodeNumber: '94', airDate: '2026-08-02T00:00:00' },
+      { episodeNumber: 'special', airDate: null }
+    ];
+
+    const released = filterReleasedEpisodes(episodes, Date.parse('2026-07-28T00:00:00Z'));
+
+    assert.deepEqual(released.map(episode => episode.episodeNumber), ['92', '93', 'special']);
   });
 
   await t.test('buildSearchAnimeUrl should preserve special characters in keyword', async () => {
